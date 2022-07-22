@@ -22,7 +22,7 @@ Format:
   ./coscli signurl cos://<bucket-name>/<key> [flags]
 
 Example:
-  ./coscli signurl cos://examplebucket/test.jpg -t 100`,
+  ./coscli signurl cos://examplebucket/test.jpg -T 100`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		time, _ := cmd.Flags().GetInt("time")
@@ -34,7 +34,7 @@ Example:
 func init() {
 	rootCmd.AddCommand(signurlCmd)
 
-	signurlCmd.Flags().IntP("time", "t", 10000, "Set the validity time of the signature(Default 10000)")
+	signurlCmd.Flags().IntP("time", "T", 10000, "Set the validity time of the signature(Default 10000)")
 }
 
 func GetSignedURL(path string, t int) {
