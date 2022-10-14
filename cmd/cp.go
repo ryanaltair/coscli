@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"context"
-	"coscli/util"
 	"fmt"
 	"os"
+
+	"coscli/util"
+	"github.com/tencentyun/cos-go-sdk-v5"
 
 	logger "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -44,7 +46,11 @@ Example:
 		rateLimiting, _ := cmd.Flags().GetFloat32("rate-limiting")
 		partSize, _ := cmd.Flags().GetInt64("part-size")
 		threadNum, _ := cmd.Flags().GetInt("thread-num")
-
+		metaString, _ := cmd.Flags().GetString("meta")
+		meta, err := util.MetaStringToHeader(metaString)
+		if err != nil {
+			logger.Fatalln("Copy invalid meta " + err.Error())
+		}
 		// args[0]: 源地址
 		// args[1]: 目标地址
 		if !util.IsCosPath(args[0]) && util.IsCosPath(args[1]) {
@@ -54,6 +60,7 @@ Example:
 				RateLimiting: rateLimiting,
 				PartSize:     partSize,
 				ThreadNum:    threadNum,
+				Meta:         meta,
 			}
 			upload(args, recursive, include, exclude, op)
 		} else if util.IsCosPath(args[0]) && !util.IsCosPath(args[1]) {
@@ -66,7 +73,7 @@ Example:
 			download(args, recursive, include, exclude, op)
 		} else if util.IsCosPath(args[0]) && util.IsCosPath(args[1]) {
 			// 拷贝
-			cosCopy(args, recursive, include, exclude)
+			cosCopy(args, recursive, include, exclude, meta, storageClass)
 		} else {
 			logger.Fatalln("cospath needs to contain cos://")
 		}
@@ -83,6 +90,9 @@ func init() {
 	cpCmd.Flags().Float32("rate-limiting", 0, "Upload or download speed limit(MB/s)")
 	cpCmd.Flags().Int64("part-size", 32, "Specifies the block size(MB)")
 	cpCmd.Flags().Int("thread-num", 5, "Specifies the number of concurrent upload or download threads")
+	cpCmd.Flags().String("meta", "",
+		"Set the meta information of the file, "+
+			"the format is header:value#header:value, the example is Cache-Control:no-cache#Content-Encoding:gzip")
 }
 
 func upload(args []string, recursive bool, include string, exclude string, op *util.UploadOptions) {
@@ -109,7 +119,7 @@ func download(args []string, recursive bool, include string, exclude string, op 
 	}
 }
 
-func cosCopy(args []string, recursive bool, include string, exclude string) {
+func cosCopy(args []string, recursive bool, include string, exclude string, meta util.Meta, storageClass string) {
 	bucketName1, cosPath1 := util.ParsePath(args[0])
 	bucketName2, cosPath2 := util.ParsePath(args[1])
 	c2 := util.NewClient(&config, &param, bucketName2)
@@ -124,7 +134,26 @@ func cosCopy(args []string, recursive bool, include string, exclude string) {
 			cosPath2 += "/"
 		}
 
-		objects := util.GetObjectsListRecursive(c1, cosPath1, 0, include, exclude)
+		objects, _ := util.GetObjectsListRecursive(c1, cosPath1, 0, include, exclude)
+
+		opt := &cos.ObjectCopyOptions{
+			ObjectCopyHeaderOptions: &cos.ObjectCopyHeaderOptions{
+				CacheControl:       meta.CacheControl,
+				ContentDisposition: meta.ContentDisposition,
+				ContentEncoding:    meta.ContentEncoding,
+				ContentType:        meta.ContentType,
+				Expires:            meta.Expires,
+				XCosStorageClass:   storageClass,
+				XCosMetaXXX:        meta.XCosMetaXXX,
+			},
+		}
+
+		if meta.CacheControl != "" || meta.ContentDisposition != "" || meta.ContentEncoding != "" ||
+			meta.ContentType != "" || meta.Expires != "" || meta.MetaChange {
+		}
+		{
+			opt.ObjectCopyHeaderOptions.XCosMetadataDirective = "Replaced"
+		}
 
 		for _, o := range objects {
 			srcKey := o.Key
@@ -136,7 +165,7 @@ func cosCopy(args []string, recursive bool, include string, exclude string) {
 			url := util.GenURL(&config, &param, bucketName1)
 			srcURL := fmt.Sprintf("%s/%s", url.BucketURL.Host, srcKey)
 
-			_, _, err := c2.Object.Copy(context.Background(), dstKey, srcURL, nil)
+			_, _, err := c2.Object.Copy(context.Background(), dstKey, srcURL, opt)
 			if err != nil {
 				logger.Fatalln(err)
 				os.Exit(1)

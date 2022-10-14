@@ -2,6 +2,8 @@ package util
 
 import (
 	"context"
+	"fmt"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"regexp"
@@ -139,7 +141,48 @@ func GetObjectsList(c *cos.Client, prefix string, limit int, include string, exc
 	return dirs, objects
 }
 
-func GetObjectsListRecursive(c *cos.Client, prefix string, limit int, include string, exclude string) (objects []cos.Object) {
+func GetObjectsListForLs(c *cos.Client, prefix string, limit int, include string, exclude string,
+	marker string) (dirs []string,
+	objects []cos.Object, isTruncated bool, nextMaker string) {
+	opt := &cos.BucketGetOptions{
+		Prefix:       prefix,
+		Delimiter:    "/",
+		EncodingType: "",
+		Marker:       marker,
+		MaxKeys:      limit,
+	}
+
+	res, _, err := c.Bucket.Get(context.Background(), opt)
+	if err != nil {
+		logger.Infoln(err.Error())
+		logger.Fatalln(err)
+		os.Exit(1)
+	}
+
+	dirs = append(dirs, res.CommonPrefixes...)
+	objects = append(objects, res.Contents...)
+
+	if limit > 0 {
+		isTruncated = false
+	} else {
+		isTruncated = res.IsTruncated
+		nextMaker = res.NextMarker
+	}
+
+	if len(include) > 0 {
+		objects = MatchCosPattern(objects, include, true)
+		dirs = MatchPattern(dirs, include, true)
+	}
+	if len(exclude) > 0 {
+		objects = MatchCosPattern(objects, exclude, false)
+		dirs = MatchPattern(dirs, exclude, false)
+	}
+
+	return dirs, objects, isTruncated, nextMaker
+}
+
+func GetObjectsListRecursive(c *cos.Client, prefix string, limit int, include string, exclude string) (objects []cos.Object,
+	commonPrefixes []string) {
 	opt := &cos.BucketGetOptions{
 		Prefix:       prefix,
 		Delimiter:    "",
@@ -160,6 +203,7 @@ func GetObjectsListRecursive(c *cos.Client, prefix string, limit int, include st
 		}
 
 		objects = append(objects, res.Contents...)
+		commonPrefixes = res.CommonPrefixes
 
 		if limit > 0 {
 			isTruncated = false
@@ -176,7 +220,43 @@ func GetObjectsListRecursive(c *cos.Client, prefix string, limit int, include st
 		objects = MatchCosPattern(objects, exclude, false)
 	}
 
-	return objects
+	return objects, commonPrefixes
+}
+
+func GetObjectsListRecursiveForLs(c *cos.Client, prefix string, limit int, include string, exclude string,
+	marker string) (objects []cos.Object, isTruncated bool, nextMarker string, commonPrefixes []string) {
+	opt := &cos.BucketGetOptions{
+		Prefix:       prefix,
+		Delimiter:    "",
+		EncodingType: "",
+		Marker:       marker,
+		MaxKeys:      limit,
+	}
+
+	res, _, err := c.Bucket.Get(context.Background(), opt)
+	if err != nil {
+		logger.Fatalln(err)
+		os.Exit(1)
+	}
+
+	objects = append(objects, res.Contents...)
+	commonPrefixes = res.CommonPrefixes
+
+	if limit > 0 {
+		isTruncated = false
+	} else {
+		isTruncated = res.IsTruncated
+		nextMarker = res.NextMarker
+	}
+
+	if len(include) > 0 {
+		objects = MatchCosPattern(objects, include, true)
+	}
+	if len(exclude) > 0 {
+		objects = MatchCosPattern(objects, exclude, false)
+	}
+
+	return objects, isTruncated, nextMarker, commonPrefixes
 }
 
 func GetLocalFilesList(localPath string, include string, exclude string) (dirs []string, files []string) {
@@ -224,11 +304,19 @@ func GetLocalFilesListRecursive(localPath string, include string, exclude string
 
 		for _, f := range fileInfos {
 			fileName := dirName + "/" + f.Name()
-			if f.IsDir() {
-				dirs = append(dirs, fileName)
-			} else {
+			if f.Mode().IsRegular() { // 普通文件，直接添加
 				fileName = fileName[len(localPath)+1:]
 				files = append(files, fileName)
+			} else if f.IsDir() { // 普通目录，添加到继续迭代
+				dirs = append(dirs, fileName)
+			} else if f.Mode()&os.ModeSymlink == fs.ModeSymlink { // 软链接
+				logger.Infoln(fmt.Sprintf("List %s file is Symlink, will be excluded, "+
+					"please list or upload it from realpath",
+					fileName))
+				continue
+			} else {
+				logger.Infoln(fmt.Sprintf("List %s file is not regular file, will be excluded", fileName))
+				continue
 			}
 		}
 	}

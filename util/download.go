@@ -5,7 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/syndtr/goleveldb/leveldb"
 
 	logger "github.com/sirupsen/logrus"
 
@@ -16,6 +20,8 @@ type DownloadOptions struct {
 	RateLimiting float32
 	PartSize     int64
 	ThreadNum    int
+	SnapshotDb   *leveldb.DB
+	SnapshotPath string
 }
 
 func DownloadPathFixed(localPath string, cosPath string) (string, string, error) {
@@ -58,8 +64,8 @@ func DownloadPathFixed(localPath string, cosPath string) (string, string, error)
 		fileName := pathList[len(pathList)-1]
 		path = localPath[:len(localPath)-len(fileName)]
 	}
-	os.MkdirAll(path, os.ModePerm)
-	return localPath, cosPath, nil
+	err := os.MkdirAll(path, os.ModePerm)
+	return localPath, cosPath, err
 }
 
 func SingleDownload(c *cos.Client, bucketName, cosPath, localPath string, op *DownloadOptions) error {
@@ -92,11 +98,27 @@ func SingleDownload(c *cos.Client, bucketName, cosPath, localPath string, op *Do
 	}
 	logger.Infof("Download cos://%s/%s => %s\n", bucketName, cosPath, localPath)
 
-	_, err = c.Object.Download(context.Background(), cosPath, localPath, opt)
+	resp, err := c.Object.Download(context.Background(), cosPath, localPath, opt)
 	if err != nil {
 		logger.Errorln(err)
 		return err
 	}
+
+	if op.SnapshotPath != "" {
+		lastModified := resp.Header.Get("Last-Modified")
+		if lastModified == "" {
+			return nil
+		}
+
+		var cosLastModifiedTime time.Time
+		cosLastModifiedTime, err = time.Parse(time.RFC1123, lastModified)
+
+		if err != nil {
+			return err
+		}
+		op.SnapshotDb.Put([]byte(cosPath), []byte(strconv.FormatInt(cosLastModifiedTime.Unix(), 10)), nil)
+	}
+
 	return nil
 }
 
@@ -107,7 +129,17 @@ func MultiDownload(c *cos.Client, bucketName, cosDir, localDir, include, exclude
 	if cosDir != "" && cosDir[len(cosDir)-1] != '/' {
 		cosDir += "/"
 	}
-	objects := GetObjectsListRecursive(c, cosDir, 0, include, exclude)
+	objects, commonPrefixes := GetObjectsListRecursive(c, cosDir, 0, include, exclude)
+	listObjects(c, bucketName, objects, cosDir, localDir, op)
+
+	if len(commonPrefixes) > 0 {
+		for i := 0; i < len(commonPrefixes); i++ {
+			localDirTemp := localDir + commonPrefixes[i]
+			MultiDownload(c, bucketName, commonPrefixes[i], localDirTemp, include, exclude, op)
+		}
+	}
+}
+func listObjects(c *cos.Client, bucketName string, objects []cos.Object, cosDir string, localDir string, op *DownloadOptions) {
 	failNum := 0
 	successNum := 0
 	if len(objects) == 0 {
